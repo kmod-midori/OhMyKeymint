@@ -18,8 +18,6 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use kmr_common::consts::{AID_KEYSTORE, AID_ROOT, AID_SYSTEM};
-
 use crate::android::hardware::security::keymint::ErrorCode::ErrorCode;
 use crate::android::hardware::security::keymint::SecurityLevel::SecurityLevel;
 use crate::android::hardware::security::keymint::Tag::Tag;
@@ -619,15 +617,6 @@ impl KeystoreService {
             },
         }
     }
-
-    fn enforce_keybox_admin(&self, ctx: &CallerInfo) -> Result<()> {
-        match ctx.uid as u32 {
-            AID_ROOT | AID_SYSTEM | AID_KEYSTORE => Ok(()),
-            uid => Err(Error::perm()).context(err!(
-                "keybox update requires root/system/keystore caller, got uid={uid}"
-            )),
-        }
-    }
 }
 
 fn calling_uid(ctx: Option<&CallerInfo>) -> AppUid {
@@ -839,48 +828,6 @@ impl IOhMyKsService for KeystoreService {
         let _wp = wd::watch("IOhMyKsService::getSupplementaryAttestationInfo");
         self.get_supplementary_attestation_info(tag)
             .map_err(into_logged_binder)
-    }
-
-    fn updateEcKeybox(
-        &self,
-        ctx: Option<&CallerInfo>,
-        key: &[u8],
-        chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
-    ) -> rsbinder::BinderResult<()> {
-        let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateEcKeybox")?;
-        self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
-        let chain: Vec<kmr_wire::keymint::Certificate> = chain
-            .iter()
-            .map(|c| kmr_wire::keymint::Certificate {
-                encoded_certificate: c.encodedCertificate.clone(),
-            })
-            .collect();
-
-        keybox::update_ec_keybox(key.to_vec(), chain).map_err(into_logged_binder)?;
-        self.ensure_security_levels_current()
-            .map_err(into_logged_binder)?;
-        Ok(())
-    }
-
-    fn updateRsaKeybox(
-        &self,
-        ctx: Option<&CallerInfo>,
-        key: &[u8],
-        chain: &[crate::android::hardware::security::keymint::Certificate::Certificate],
-    ) -> rsbinder::BinderResult<()> {
-        let ctx = require_omk_ctx(ctx, "IOhMyKsService::updateRsaKeybox")?;
-        self.enforce_keybox_admin(ctx).map_err(into_logged_binder)?;
-        let chain: Vec<kmr_wire::keymint::Certificate> = chain
-            .iter()
-            .map(|c| kmr_wire::keymint::Certificate {
-                encoded_certificate: c.encodedCertificate.clone(),
-            })
-            .collect();
-
-        keybox::update_rsa_keybox(key.to_vec(), chain).map_err(into_logged_binder)?;
-        self.ensure_security_levels_current()
-            .map_err(into_logged_binder)?;
-        Ok(())
     }
 
     fn isOmkGrant(&self, ctx: Option<&CallerInfo>, grant: &KeyDescriptor) -> Result<bool, Status> {

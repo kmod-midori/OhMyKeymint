@@ -346,34 +346,40 @@ impl KeyboxEntry {
         ec_chain: &[keymint::Certificate],
         rsa_chain: Option<&[keymint::Certificate]>,
     ) -> Result<(Vec<u8>, SystemTime)> {
-        let mut serial = None;
-        let mut not_after: Option<SystemTime> = None;
+        let ec_leaf = ec_chain.first().context("EC certificate chain is empty")?;
+        let ec_leaf = <Certificate as x509_der::Decode>::from_der(&ec_leaf.encoded_certificate)
+            .context("failed to parse EC leaf certificate")?;
+        let serial = ec_leaf
+            .tbs_certificate()
+            .serial_number()
+            .as_bytes()
+            .to_vec();
+        let mut not_after = ec_leaf
+            .tbs_certificate()
+            .validity()
+            .not_after
+            .to_system_time();
 
-        for certificate in ec_chain.iter().chain(rsa_chain.unwrap_or_default()) {
+        for certificate in ec_chain.iter().skip(1).chain(rsa_chain.unwrap_or_default()) {
             let parsed =
                 <Certificate as x509_der::Decode>::from_der(&certificate.encoded_certificate)
                     .context("failed to parse keybox certificate")?;
-            if serial.is_none() {
-                serial = Some(parsed.tbs_certificate().serial_number().as_bytes().to_vec());
-            }
             let expiry = parsed
                 .tbs_certificate()
                 .validity()
                 .not_after
                 .to_system_time();
-            not_after = Some(not_after.map_or(expiry, |current| current.min(expiry)));
+            not_after = not_after.min(expiry);
         }
 
-        Ok((
-            serial.context("EC certificate chain is empty")?,
-            not_after.context("certificate chain is empty")?,
-        ))
+        Ok((serial, not_after))
     }
 
     fn is_expired(&self) -> bool {
         self.not_after <= SystemTime::now()
     }
 
+    #[cfg(test)]
     fn to_xml(&self) -> KeyboxBlockXml {
         let mut keys = vec![KeyBox::to_xml_block(&self.ec_info, KeyAlgorithm::Ec)];
         if let Some(rsa_info) = &self.rsa_info {
@@ -404,59 +410,8 @@ impl KeyboxEntry {
     }
 }
 
+#[cfg(test)]
 impl KeyBox {
-    pub fn update_rsa_keybox(
-        &mut self,
-        key_der: Vec<u8>,
-        chain: Vec<keymint::Certificate>,
-    ) -> Result<()> {
-        self.update_keybox(KeyAlgorithm::Rsa, key_der, chain)
-    }
-
-    pub fn update_ec_keybox(
-        &mut self,
-        key_der: Vec<u8>,
-        chain: Vec<keymint::Certificate>,
-    ) -> Result<()> {
-        self.update_keybox(KeyAlgorithm::Ec, key_der, chain)
-    }
-
-    fn update_keybox(
-        &mut self,
-        algorithm: KeyAlgorithm,
-        key_der: Vec<u8>,
-        chain: Vec<keymint::Certificate>,
-    ) -> Result<()> {
-        let entry = ParsedKeyEntry {
-            key_der,
-            chain: chain
-                .into_iter()
-                .map(|certificate| certificate.encoded_certificate)
-                .collect(),
-        };
-        let info = match algorithm {
-            KeyAlgorithm::Ec => Self::build_ec_info(entry)?,
-            KeyAlgorithm::Rsa => Self::build_rsa_info(entry)?,
-        };
-        let index = match algorithm {
-            KeyAlgorithm::Ec => 0,
-            KeyAlgorithm::Rsa => self
-                .keyboxes
-                .iter()
-                .position(|keybox| keybox.rsa_info.is_some())
-                .unwrap_or(0),
-        };
-        let target = self
-            .keyboxes
-            .get_mut(index)
-            .context("keybox.xml has no entries")?;
-        *target = match algorithm {
-            KeyAlgorithm::Ec => KeyboxEntry::new(info, target.rsa_info.take())?,
-            KeyAlgorithm::Rsa => KeyboxEntry::new(target.ec_info.clone(), Some(info))?,
-        };
-        self.validate_serial_uniqueness()
-    }
-
     pub fn to_xml_string(&self) -> String {
         let document = KeyboxXml {
             number_of_keyboxes: self.keyboxes.len(),
@@ -616,6 +571,7 @@ fn decode_pem(pem: &str) -> Result<Vec<u8>> {
         .context("failed to decode PEM payload")
 }
 
+#[cfg(test)]
 fn encode_pem_block(label: &str, der: &[u8]) -> String {
     let mut pem = String::new();
     pem.push_str(&format!("-----BEGIN {label}-----\n"));
@@ -844,26 +800,6 @@ pub fn initialize() -> Result<()> {
         }
     });
     Ok(())
-}
-
-pub fn update_rsa_keybox(key_der: Vec<u8>, chain: Vec<keymint::Certificate>) -> Result<bool> {
-    update_keybox_file(KeyAlgorithm::Rsa, key_der, chain)
-}
-
-pub fn update_ec_keybox(key_der: Vec<u8>, chain: Vec<keymint::Certificate>) -> Result<bool> {
-    update_keybox_file(KeyAlgorithm::Ec, key_der, chain)
-}
-
-fn update_keybox_file(
-    algorithm: KeyAlgorithm,
-    key_der: Vec<u8>,
-    chain: Vec<keymint::Certificate>,
-) -> Result<bool> {
-    let _io_guard = KEYBOX_IO_LOCK.lock().unwrap();
-    let mut keybox = KEYBOX.read().unwrap().clone();
-    keybox.update_keybox(algorithm, key_der, chain)?;
-    write_keybox_xml(KEYBOX_PATH, &keybox.to_xml_string())?;
-    Ok(install_keybox(keybox, true, true))
 }
 
 pub fn active_identity_digests() -> Vec<[u8; 32]> {
