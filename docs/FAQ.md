@@ -225,7 +225,10 @@ each certificate body must still be valid PEM.
 OMK assigns one block to each calling UID the first time that UID requests
 attestation and stores the assignment in the OMK database. A UID keeps its
 block while the serial is still present and the certificates have not expired;
-otherwise OMK assigns another block, preferring serials that no UID uses yet.
+otherwise OMK assigns another block with the fewest assigned UIDs, choosing
+randomly among ties. Unassigned serials are therefore preferred, and occupied
+blocks are shared according to their assignment counts. Existing valid
+assignments stay unchanged.
 When every block is expired, OMK refuses attestation with
 `OUT_OF_KEYS_TRANSIENT_ERROR`. The bundled template is exempt: as a fallback it
 is used even when its certificates have expired.

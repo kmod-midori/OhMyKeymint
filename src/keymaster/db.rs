@@ -1727,28 +1727,27 @@ impl KeystoreDB {
             let serial = match binding {
                 Some(serial) if valid.contains(&serial) => serial,
                 _ => {
-                    let used = {
+                    let counts = {
                         let mut stmt = tx
-                            .prepare("SELECT serial FROM persistent.keybox_uid_binding;")
+                            .prepare("SELECT serial, COUNT(*) FROM persistent.keybox_uid_binding GROUP BY serial;")
                             .context("Failed to prepare keybox binding query.")?;
                         let rows = stmt
-                            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                            .query_map([], |row| {
+                                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+                            })
                             .context("Failed to query keybox bindings.")?;
-                        rows.collect::<rusqlite::Result<Vec<_>>>()
+                        rows.collect::<rusqlite::Result<HashMap<_, _>>>()
                             .context("Failed to collect keybox bindings.")?
                     };
-                    let unused: Vec<&Vec<u8>> = valid
+                    let minimum = valid
                         .iter()
-                        .filter(|serial| !used.contains(*serial))
+                        .map(|serial| counts.get(serial).copied().unwrap_or(0))
+                        .min()
+                        .context("keybox.xml has no usable entries")?;
+                    let pool: Vec<&Vec<u8>> = valid
+                        .iter()
+                        .filter(|serial| counts.get(*serial).copied().unwrap_or(0) == minimum)
                         .collect();
-                    let pool: Vec<&Vec<u8>> = if unused.is_empty() {
-                        valid.iter().collect()
-                    } else {
-                        unused
-                    };
-                    if pool.is_empty() {
-                        return Err(anyhow::anyhow!("keybox.xml has no usable entries"));
-                    }
                     let serial = pool[rand::random_range(0..pool.len())].clone();
                     tx.execute(
                         "INSERT INTO persistent.keybox_uid_binding (uid, serial) VALUES (?, ?)
@@ -4062,9 +4061,13 @@ mod tests {
         let second = db.resolve_keybox_serial(1001, &candidates).unwrap();
         assert_ne!(first, second);
 
-        // All serials are in use: any valid one is acceptable.
+        // Both serials have one UID: either tied candidate is acceptable.
         let third = db.resolve_keybox_serial(1002, &candidates).unwrap();
         assert!(candidates.contains(&third));
+
+        // The next UID must use the less occupied serial, restoring equal counts.
+        let fourth = db.resolve_keybox_serial(1003, &candidates).unwrap();
+        assert_ne!(third, fourth);
 
         // The bound serial is expired, so the UID is reassigned to the only valid one.
         assert_eq!(
@@ -4074,7 +4077,38 @@ mod tests {
         );
 
         // The caller rejects an all-expired keybox before reaching the database.
-        assert!(db.resolve_keybox_serial(1003, &[]).is_err());
+        assert!(db.resolve_keybox_serial(1004, &[]).is_err());
+    }
+
+    #[test]
+    fn resolve_keybox_serial_balances_new_and_stale_bindings() {
+        let mut db = make_test_db();
+        let a = vec![0x01];
+        let b = vec![0x02];
+        let removed = vec![0x03];
+        for uid in 1000..1004 {
+            db.resolve_keybox_serial(uid, std::slice::from_ref(&a))
+                .unwrap();
+        }
+        db.resolve_keybox_serial(1004, std::slice::from_ref(&b))
+            .unwrap();
+        db.resolve_keybox_serial(1005, std::slice::from_ref(&removed))
+            .unwrap();
+        let valid = vec![a.clone(), b.clone()];
+
+        // Keep valid assignments even when another serial has fewer UIDs.
+        assert_eq!(a, db.resolve_keybox_serial(1000, &valid).unwrap());
+        assert_eq!(b, db.resolve_keybox_serial(1006, &valid).unwrap());
+        assert_eq!(b, db.resolve_keybox_serial(1005, &valid).unwrap());
+        assert_eq!(b, db.resolve_keybox_serial(1007, &valid).unwrap());
+
+        // A and B now have four UIDs each; adding a new serial prefers its zero count.
+        let fresh = vec![0x04];
+        assert_eq!(
+            fresh,
+            db.resolve_keybox_serial(1008, &[a, b, fresh.clone()])
+                .unwrap()
+        );
     }
 
     #[test]
