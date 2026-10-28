@@ -137,7 +137,7 @@ impl KeystoreService {
 
         DB.with(|db| {
             db.borrow_mut()
-                .retire_stale_keybox_bound_entries(keybox::current_identity_digest())
+                .retire_stale_keybox_bound_entries(&keybox::active_identity_digests())
         })
     }
 

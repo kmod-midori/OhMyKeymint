@@ -220,7 +220,8 @@ pub fn into_binder(e: anyhow::Error) -> BinderStatus {
 /// Errors are squashed into one number space using following rules:
 /// - All Keystore and Keymint errors codes are identity mapped. It's possible because by
 ///   convention Keystore `ResponseCode` errors are positive, and Keymint `ErrorCode` errors are
-///   negative.
+///   negative. One exception: Keymint `ATTESTATION_KEYS_NOT_PROVISIONED` becomes
+///   `ResponseCode::OUT_OF_KEYS_TRANSIENT_ERROR`.
 /// - `selinux::Error::PermissionDenied` is mapped to `ResponseCode::PERMISSION_DENIED`.
 /// - All other error conditions, e.g. Binder errors, are mapped to `ResponseCode::SYSTEM_ERROR`.
 ///
@@ -233,6 +234,11 @@ pub struct SerializedError(pub i32);
 pub fn error_to_serialized_error(e: &Error) -> SerializedError {
     match e {
         Error::Rc(rcode) => SerializedError(rcode.0),
+        // An expired keybox cannot sign attestations; report the Keymint code as the Keystore
+        // out-of-keys condition.
+        Error::Km(ErrorCode::ATTESTATION_KEYS_NOT_PROVISIONED) => {
+            SerializedError(ResponseCode::OUT_OF_KEYS_TRANSIENT_ERROR.0)
+        }
         Error::Km(ec) => SerializedError(ec.0),
         // Binder errors are reported as system error.
         Error::Binder(_, _) | Error::BinderTransaction(_) => {

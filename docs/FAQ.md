@@ -213,11 +213,22 @@ keybox that you use.
 
 ### What makes a keybox valid?
 
-OMK requires one complete EC entry and accepts an optional complete RSA entry.
-For any entry that is present, the private key must match its certificate
-chain. When an RSA entry is absent, attestation for RSA keys is signed with the
-EC key and its certificate chain. The file must also be clean XML, without watermarks, comments inserted
-into key data, invisible characters, or other extra content.
+OMK accepts one or more `<Keybox>` blocks. Each block requires one complete EC
+entry and accepts an optional complete RSA entry. For any entry that is
+present, the private key must match its certificate chain. When an RSA entry is
+absent, attestation for RSA keys is signed with the EC key and its certificate
+chain. The EC leaf certificate serial identifies the block, and serials must be
+unique. The file must be well-formed XML. OMK ignores comments, unknown
+elements, and content outside the key data it reads, but the private key and
+each certificate body must still be valid PEM.
+
+OMK assigns one block to each calling UID the first time that UID requests
+attestation and stores the assignment in the OMK database. A UID keeps its
+block while the serial is still present and the certificates have not expired;
+otherwise OMK assigns another block, preferring serials that no UID uses yet.
+When every block is expired, OMK refuses attestation with
+`OUT_OF_KEYS_TRANSIENT_ERROR`. The bundled template is exempt: as a fallback it
+is used even when its certificates have expired.
 
 A file working in another module does not prove that it is valid. Some other
 tools accept damaged or incomplete XML that OMK correctly rejects.
@@ -247,10 +258,10 @@ was active when the keys were created. After a keybox change, those apps may
 require sign-in, identity verification, or device registration again. This
 cannot always be avoided.
 
-OMK deletes those keys by default. If
+OMK deletes keys whose keybox entry was removed from the file, by default. If
 [`main.retire_stale_keybox_bound_keys`](CONFIGURATION.md#retire_stale_keybox_bound_keys)
-is disabled, the keybox change instead keeps client keys created under the
-previous keybox identity.
+is disabled, those keys are kept. UIDs assigned to entries that remain in the
+file keep their keys.
 
 Change a keybox only when you have time to re-register important apps. Back up
 first, but do not delete the whole OMK data directory.

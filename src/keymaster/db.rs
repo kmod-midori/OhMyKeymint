@@ -1366,6 +1366,14 @@ impl KeystoreDB {
         .context("Failed to create index keymetadata_keyentryid_index.")?;
 
         tx.execute(
+            "CREATE TABLE IF NOT EXISTS persistent.keybox_uid_binding (
+                    uid INTEGER PRIMARY KEY,
+                    serial BLOB NOT NULL);",
+            [],
+        )
+        .context("Failed to initialize \"keybox_uid_binding\" table.")?;
+
+        tx.execute(
             "CREATE TABLE IF NOT EXISTS persistent.grant (
                     id INTEGER UNIQUE,
                     grantee INTEGER,
@@ -1701,9 +1709,65 @@ impl KeystoreDB {
         .context(ks_err!())
     }
 
+    /// Resolve the calling UID's keybox serial, persisting a new assignment when the previous
+    /// one is absent or expired.
+    pub fn resolve_keybox_serial(&mut self, uid: i64, valid: &[Vec<u8>]) -> Result<Vec<u8>> {
+        let _wp = wd::watch("KeystoreDB::resolve_keybox_serial");
+
+        self.with_transaction(Immediate("TX_resolve_keybox_serial"), |tx| {
+            let binding: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT serial FROM persistent.keybox_uid_binding WHERE uid = ?;",
+                    params![uid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("Failed to query keybox binding.")?;
+
+            let serial = match binding {
+                Some(serial) if valid.contains(&serial) => serial,
+                _ => {
+                    let used = {
+                        let mut stmt = tx
+                            .prepare("SELECT serial FROM persistent.keybox_uid_binding;")
+                            .context("Failed to prepare keybox binding query.")?;
+                        let rows = stmt
+                            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                            .context("Failed to query keybox bindings.")?;
+                        rows.collect::<rusqlite::Result<Vec<_>>>()
+                            .context("Failed to collect keybox bindings.")?
+                    };
+                    let unused: Vec<&Vec<u8>> = valid
+                        .iter()
+                        .filter(|serial| !used.contains(*serial))
+                        .collect();
+                    let pool: Vec<&Vec<u8>> = if unused.is_empty() {
+                        valid.iter().collect()
+                    } else {
+                        unused
+                    };
+                    if pool.is_empty() {
+                        return Err(anyhow::anyhow!("keybox.xml has no usable entries"));
+                    }
+                    let serial = pool[rand::random_range(0..pool.len())].clone();
+                    tx.execute(
+                        "INSERT INTO persistent.keybox_uid_binding (uid, serial) VALUES (?, ?)
+                         ON CONFLICT(uid) DO UPDATE SET serial = excluded.serial;",
+                        params![uid, serial],
+                    )
+                    .context("Failed to persist keybox binding.")?;
+                    serial
+                }
+            };
+
+            Ok((false, serial))
+        })
+        .context(ks_err!())
+    }
+
     pub fn retire_stale_keybox_bound_entries(
         &mut self,
-        current_identity_digest: [u8; 32],
+        active_identity_digests: &[[u8; 32]],
     ) -> Result<usize> {
         let _wp = wd::watch("KeystoreDB::retire_stale_keybox_bound_entries");
 
@@ -1741,7 +1805,9 @@ impl KeystoreDB {
                             && km_uuid.is_keybox_bound()
                             && prefix.as_slice() == km_uuid.get_digest() =>
                     {
-                        !km_uuid.is_bound_to_keybox_digest(current_identity_digest)
+                        !active_identity_digests
+                            .iter()
+                            .any(|digest| km_uuid.is_bound_to_keybox_digest(*digest))
                     }
                     Value::Blob(prefix) => {
                         log::warn!(
@@ -3940,7 +4006,7 @@ mod tests {
 
         assert_eq!(
             2,
-            db.retire_stale_keybox_bound_entries(current_digest)
+            db.retire_stale_keybox_bound_entries(&[current_digest])
                 .unwrap()
         );
 
@@ -3954,6 +4020,61 @@ mod tests {
         assert_eq!(BlobState::Current, blob_state(&db, 3));
         assert_eq!(BlobState::Current, blob_state(&db, 4));
         assert_eq!(BlobState::Current, blob_state(&db, 5));
+    }
+
+    #[test]
+    fn retire_stale_keybox_bound_entries_keeps_every_active_digest() {
+        let first = [0x55; 32];
+        let second = [0x66; 32];
+        let stale = [0x77; 32];
+        let mut db = make_test_db();
+
+        {
+            let tx = db.conn.transaction().unwrap();
+            for (id, digest) in [(1, first), (2, second), (3, stale)] {
+                let uuid = Uuid::from_keybox_digest(SecurityLevel::TRUSTED_ENVIRONMENT, digest);
+                insert_live_client_key(&tx, id, uuid, "keybox-key");
+                add_keybox_attestation_metadata(&tx, id, uuid);
+            }
+            tx.commit().unwrap();
+        }
+
+        assert_eq!(
+            1,
+            db.retire_stale_keybox_bound_entries(&[first, second])
+                .unwrap()
+        );
+        assert_eq!(1, key_entry_count(&db, 1));
+        assert_eq!(1, key_entry_count(&db, 2));
+        assert_eq!(0, key_entry_count(&db, 3));
+    }
+
+    #[test]
+    fn resolve_keybox_serial_reuses_binding_and_prefers_unused() {
+        let mut db = make_test_db();
+        let a = vec![0x01];
+        let b = vec![0x02];
+        let candidates = vec![a.clone(), b.clone()];
+
+        let first = db.resolve_keybox_serial(1000, &candidates).unwrap();
+        assert_eq!(first, db.resolve_keybox_serial(1000, &candidates).unwrap());
+
+        let second = db.resolve_keybox_serial(1001, &candidates).unwrap();
+        assert_ne!(first, second);
+
+        // All serials are in use: any valid one is acceptable.
+        let third = db.resolve_keybox_serial(1002, &candidates).unwrap();
+        assert!(candidates.contains(&third));
+
+        // The bound serial is expired, so the UID is reassigned to the only valid one.
+        assert_eq!(
+            b,
+            db.resolve_keybox_serial(1000, std::slice::from_ref(&b))
+                .unwrap()
+        );
+
+        // The caller rejects an all-expired keybox before reaching the database.
+        assert!(db.resolve_keybox_serial(1003, &[]).is_err());
     }
 
     #[test]
@@ -3974,7 +4095,7 @@ mod tests {
 
         assert_eq!(
             1,
-            db.retire_stale_keybox_bound_entries(current_digest)
+            db.retire_stale_keybox_bound_entries(&[current_digest])
                 .unwrap()
         );
 

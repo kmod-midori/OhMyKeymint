@@ -770,6 +770,7 @@ impl KeystoreSecurityLevel {
                 .context(ks_err!("Alias must be specified"));
         }
         let caller_uid = caller_uid(ctx);
+        let _keybox_scope = crate::keybox::attestation_request_scope(caller_uid.0 as u32);
 
         let key = match key.domain {
             Domain::APP => KeyDescriptor {
@@ -867,6 +868,7 @@ impl KeystoreSecurityLevel {
                 .context(ks_err!("Alias must be specified"));
         }
         let caller_uid = caller_uid(ctx);
+        let _keybox_scope = crate::keybox::attestation_request_scope(caller_uid.0 as u32);
 
         let key = match key.domain {
             Domain::APP => KeyDescriptor {
@@ -954,6 +956,7 @@ impl KeystoreSecurityLevel {
         }
 
         let caller_uid = caller_uid(ctx);
+        let _keybox_scope = crate::keybox::attestation_request_scope(caller_uid.0 as u32);
 
         let key = match key.domain {
             Domain::APP => KeyDescriptor {

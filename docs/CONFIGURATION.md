@@ -163,15 +163,14 @@ keymint.
 
 #### `retire_stale_keybox_bound_keys`
 
-When `true`, changing the active `keybox.xml` deletes client keys that were
-created under the previous keybox identity and attested with that keybox. The
-default is `true`, so a keybox change never leaves keys bound to a stale
-identity.
+When `true`, a `keybox.xml` reload deletes client keys that were attested with
+a keybox entry no longer present in the file. Entries that remain in the file
+keep their keys. The default is `true`, so a keybox change never leaves keys
+bound to a stale identity.
 
-Set it to `false` only when replacing or rotating keybox material must keep
-existing keys usable. A keybox that rotates periodically with this disabled
-leaves every older key bound to an identity the active keybox no longer
-provides.
+Set it to `false` only when removing keybox entries must keep existing keys
+usable. An entry that rotates out with this disabled leaves its keys bound to
+an identity the active file no longer provides.
 
 The value is read when keybox-bound retirement runs, so a saved change applies
 to the next keybox reload or keymint restart.

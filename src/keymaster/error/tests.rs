@@ -88,8 +88,11 @@ fn keystore_error_test() -> anyhow::Result<(), String> {
     }
 
     // All Keystore Error::Km(x) get mapped on a service
-    // specific error of x.
+    // specific error of x, except the code handled below.
     for ec in ErrorCode::UNKNOWN_ERROR.0..ErrorCode::ROOT_OF_TRUST_ALREADY_SET.0 {
+        if ec == ErrorCode::ATTESTATION_KEYS_NOT_PROVISIONED.0 {
+            continue;
+        }
         assert_eq!(
             Result::<(), i32>::Err(ec),
             nested_ec(ErrorCode(ec))
@@ -99,14 +102,32 @@ fn keystore_error_test() -> anyhow::Result<(), String> {
     }
 
     // All Keymint errors x received through a Binder Result get mapped on
-    // a service specific error of x.
+    // a service specific error of x, except the code handled below.
     for ec in ErrorCode::UNKNOWN_ERROR.0..ErrorCode::ROOT_OF_TRUST_ALREADY_SET.0 {
+        if ec == ErrorCode::ATTESTATION_KEYS_NOT_PROVISIONED.0 {
+            continue;
+        }
         assert_eq!(
             Result::<(), i32>::Err(ec),
             map_km_error(binder_sse_error(ec))
                 .with_context(|| format!("Km error code: {ec}."))
                 .map_err(into_logged_binder)
                 .map_err(|s| s.service_specific_error())
+        );
+    }
+
+    // An expired keybox reports the transient out-of-keys condition instead of the Keymint code.
+    for result in [
+        nested_ec(ErrorCode::ATTESTATION_KEYS_NOT_PROVISIONED).map_err(into_logged_binder),
+        map_km_error(binder_sse_error(
+            ErrorCode::ATTESTATION_KEYS_NOT_PROVISIONED.0,
+        ))
+        .context("expired keybox")
+        .map_err(into_logged_binder),
+    ] {
+        assert_eq!(
+            Result::<(), i32>::Err(ResponseCode::OUT_OF_KEYS_TRANSIENT_ERROR.0),
+            result.map_err(|s| s.service_specific_error())
         );
     }
 
